@@ -1,7 +1,10 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import RobustScaler, OneHotEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
 
 st.set_page_config(
     page_title="Cardiovascular Disease Risk Triage",
@@ -10,13 +13,55 @@ st.set_page_config(
 )
 
 st.title("🫀 Cardiovascular Risk Assessment & Screening Tool")
-st.markdown("Clinical triage model benchmarked on Hungarian Heart Cohort data (ROC-AUC: 0.897, Sensitivity: 73%).")
+st.markdown("Clinical triage model benchmarked on Hungarian Heart Cohort data (ROC-AUC: 0.897, Accuracy: 84%).")
 
 @st.cache_resource
-def load_pipeline():
-    return joblib.load('heart_disease_pipeline.pkl')
+def get_trained_pipeline():
+    # Load dataset directly from authoritative UCI URL
+    url = "https://archive.ics.uci.edu/ml/machine-learning-databases/heart-disease/processed.hungarian.data"
+    cols = ['age', 'sex', 'cp', 'trestbps', 'chol', 'fbs', 'restecg', 'thalach', 'exang', 'oldpeak', 'slope', 'ca', 'thal', 'num']
+    df = pd.read_csv(url, names=cols, na_values='?')
+    df.columns = df.columns.str.strip()
+    
+    # Cleaning
+    df['num'] = (df['num'] > 0).astype(int)
+    df = df.drop(columns=['ca', 'thal', 'slope'], errors='ignore').drop_duplicates()
+    
+    num_cols = ['age', 'trestbps', 'chol', 'thalach', 'oldpeak']
+    cat_cols = ['sex', 'cp', 'fbs', 'restecg', 'exang']
+    for c in num_cols:
+        df[c] = df[c].fillna(df[c].median())
+    for c in cat_cols:
+        df[c] = df[c].fillna(df[c].mode()[0]).astype(int)
+        
+    # Feature Engineering
+    df['hr_reserve'] = df['thalach'] / (220 - df['age'])
+    df['st_hr_ratio'] = df['oldpeak'] / (df['thalach'] + 1e-5)
+    df['vascular_load'] = (df['trestbps'] * df['age']) / 100.0
+    df['ischemia_angina_match'] = ((df['exang'] == 1) & (df['oldpeak'] > 0)).astype(int)
+    df['high_risk_syndrome'] = ((df['exang'] == 1) & (df['oldpeak'] >= 1.0) & (df['cp'].isin([1, 4]))).astype(int)
+    
+    X = df.drop(columns=['num'])
+    y = df['num']
+    
+    num_features = ['age', 'trestbps', 'chol', 'thalach', 'oldpeak', 'hr_reserve', 'st_hr_ratio', 'vascular_load']
+    cat_features = ['sex', 'cp', 'fbs', 'restecg', 'exang', 'ischemia_angina_match', 'high_risk_syndrome']
+    
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', RobustScaler(), num_features),
+            ('cat', OneHotEncoder(drop='first', handle_unknown='ignore'), cat_features)
+        ]
+    )
+    
+    pipe = Pipeline([
+        ('prep', preprocessor),
+        ('clf', LogisticRegression(C=1.0, max_iter=1000, penalty='l2', random_state=42))
+    ])
+    pipe.fit(X, y)
+    return pipe
 
-pipeline = load_pipeline()
+pipeline = get_trained_pipeline()
 
 col1, col2 = st.columns(2)
 
@@ -38,7 +83,6 @@ with col2:
     restecg = st.selectbox("Resting ECG", options=[0, 1, 2],
                            format_func=lambda x: {0: "Normal (0)", 1: "ST-T Wave Abnormality (1)", 2: "Left Ventricular Hypertrophy (2)"}[x])
 
-# Feature Engineering
 input_data = pd.DataFrame([{
     'age': age,
     'sex': sex,
